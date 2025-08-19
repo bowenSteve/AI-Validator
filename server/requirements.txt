@@ -1,0 +1,22 @@
+# Flask and core dependencies
+Flask==2.3.3
+flask-cors==4.0.0
+flask-jwt-extended==4.5.3
+python-dotenv==1.0.0
+
+# MongoDB dependencies (gridfs is included in pymongo)
+pymongo==4.5.0
+
+# Image processing and validation
+Pillow==10.0.1
+python-magic==0.4.27
+
+# File handling and security
+Werkzeug==2.3.7
+
+# Production server
+gunicorn==21.2.0
+
+# Development dependencies (optional)
+pytest==7.4.2
+pytest-flask==1.2.0
