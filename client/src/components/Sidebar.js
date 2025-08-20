@@ -15,10 +15,10 @@ const Sidebar = ({ isDark, activeItem, setActiveItem }) => {
       <div className="p-6">
         <div className="flex items-center space-x-2">
           <div className={`w-8 h-8 ${isDark ? 'bg-cyan-400' : 'bg-blue-500'} rounded flex items-center justify-center`}>
-            <span className="text-white font-bold text-lg">H</span>
+            <span className="text-white font-bold text-lg">MV</span>
           </div>
           <span className={`font-semibold text-lg ${isDark ? 'text-white' : 'text-gray-900'}`}>
-            Huemint
+            Middesk Validator
           </span>
         </div>
       </div>

@@ -27,6 +27,7 @@ const SettingsComponent = ({ isDark }) => (
 
 // Main App Component
 function Main() {
+
   const [isDark, setIsDark] = useState(false);
   const [activeItem, setActiveItem] = useState('Dashboard');
 

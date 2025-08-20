@@ -10,8 +10,13 @@ from werkzeug.utils import secure_filename
 import magic
 from PIL import Image
 import io
+import logging
+
+# Import Gemini service
+from services.gemini import gemini_service
 
 uploads_bp = Blueprint('Uploads', __name__, url_prefix='/api/uploads')
+logger = logging.getLogger(__name__)
 
 def get_db():
     client = pymongo.MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
@@ -58,7 +63,7 @@ def optimize_image(file_data, max_size=(1920, 1080), quality=85):
         return file_data  # Return original if optimization fails
 
 def handle_image_upload(file_data, filename, content_type, image_type):
-    """Common function to handle image upload logic"""
+    """Common function to handle image upload logic with Gemini processing"""
     # Validate file size (10MB limit)
     if len(file_data) > 10 * 1024 * 1024:
         raise ValueError('File size exceeds 10MB limit')
@@ -89,6 +94,10 @@ def handle_image_upload(file_data, filename, content_type, image_type):
         }
     )
     
+    # Process with Gemini API
+    logger.info(f"Triggering Gemini API call for {image_type} image processing")
+    gemini_success, gemini_result = gemini_service.extract_text_from_image(optimized_data, image_type)
+    
     # Store metadata in uploads collection
     db = get_db()
     uploads_collection = db.uploads
@@ -102,19 +111,41 @@ def handle_image_upload(file_data, filename, content_type, image_type):
         'file_size': len(optimized_data),
         'original_size': len(file_data),
         'upload_date': datetime.utcnow(),
-        'status': 'uploaded'
+        'status': 'uploaded',
+        'gemini_processing': {
+            'processed': gemini_success,
+            'processed_at': datetime.utcnow() if gemini_success else None,
+            'result': gemini_result,
+            'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'error': gemini_result.get('error') if not gemini_success else None
+        }
     }
     
     result = uploads_collection.insert_one(upload_record)
     
-    return {
+    # Prepare response
+    response_data = {
         'upload_id': str(result.inserted_id),
         'file_id': str(file_id),
         'filename': unique_filename,
         'image_type': image_type,
         'file_size': len(optimized_data),
-        'upload_date': upload_record['upload_date'].isoformat()
+        'upload_date': upload_record['upload_date'].isoformat(),
+        'gemini_processing': {
+            'success': gemini_success,
+            'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'error': gemini_result.get('error') if not gemini_success else None,
+            'processing_time': gemini_result.get('attempt', 1) if gemini_success else None
+        }
     }
+    
+    # Log the result
+    if gemini_success:
+        logger.info(f"Successfully processed {image_type} image with Gemini. Text length: {len(gemini_result.get('extracted_text', ''))}")
+    else:
+        logger.error(f"Failed to process {image_type} image with Gemini: {gemini_result.get('error', 'Unknown error')}")
+    
+    return response_data
 
 # ============= MAIN IMAGE ROUTES =============
 
@@ -138,6 +169,8 @@ def upload_main_image():
         
         # Read file data
         file_data = file.read()
+        
+        logger.info(f"File received: {file.filename} ({len(file_data)} bytes) for main upload")
         
         # Handle upload
         result = handle_image_upload(file_data, file.filename, file.content_type, 'main')
@@ -175,6 +208,7 @@ def upload_main_image_base64():
         
         try:
             file_data = base64.b64decode(image_data)
+            logger.info(f"Base64 file received: {filename} ({len(file_data)} bytes) for main upload")
         except Exception:
             return jsonify({'error': 'Invalid base64 image data'}), 400
         
@@ -299,6 +333,8 @@ def upload_secondary_image():
         # Read file data
         file_data = file.read()
         
+        logger.info(f"File received: {file.filename} ({len(file_data)} bytes) for secondary upload")
+        
         # Handle upload
         result = handle_image_upload(file_data, file.filename, file.content_type, 'secondary')
         
@@ -335,6 +371,7 @@ def upload_secondary_image_base64():
         
         try:
             file_data = base64.b64decode(image_data)
+            logger.info(f"Base64 file received: {filename} ({len(file_data)} bytes) for secondary upload")
         except Exception:
             return jsonify({'error': 'Invalid base64 image data'}), 400
         
@@ -438,7 +475,93 @@ def delete_secondary_image(upload_id):
 
 
 
-# ============= SHARED ROUTES =============
+# ============= TEXT EXTRACTION ROUTES =============
+
+@uploads_bp.route('/text/<upload_id>', methods=['GET'])
+def get_extracted_text(upload_id):
+    """
+    Get extracted text for a specific upload
+    """
+    try:
+        db = get_db()
+        uploads_collection = db.uploads
+        
+        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        if not upload:
+            return jsonify({'error': 'Upload not found'}), 404
+        
+        gemini_data = upload.get('gemini_processing', {})
+        
+        return jsonify({
+            'success': True,
+            'upload_id': upload_id,
+            'image_type': upload['image_type'],
+            'filename': upload['original_filename'],
+            'extracted_text': gemini_data.get('extracted_text', ''),
+            'processing_success': gemini_data.get('processed', False),
+            'processed_at': gemini_data.get('processed_at'),
+            'error': gemini_data.get('error')
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Get extracted text error: {str(e)}")
+        return jsonify({'error': 'Failed to retrieve extracted text'}), 500
+
+@uploads_bp.route('/reprocess/<upload_id>', methods=['POST'])
+def reprocess_with_gemini(upload_id):
+    """
+    Reprocess an upload with Gemini API (useful for failed attempts)
+    """
+    try:
+        db = get_db()
+        uploads_collection = db.uploads
+        
+        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        if not upload:
+            return jsonify({'error': 'Upload not found'}), 404
+        
+        # Get image data from GridFS
+        fs = get_gridfs()
+        try:
+            grid_out = fs.get(upload['file_id'])
+            image_data = grid_out.read()
+        except gridfs.NoFile:
+            return jsonify({'error': 'Image file not found'}), 404
+        
+        # Reprocess with Gemini
+        logger.info(f"Triggering Gemini API call for reprocessing {upload['image_type']} image")
+        gemini_success, gemini_result = gemini_service.extract_text_from_image(
+            image_data, 
+            upload['image_type']
+        )
+        
+        # Update upload record
+        update_data = {
+            'gemini_processing.processed': gemini_success,
+            'gemini_processing.processed_at': datetime.utcnow() if gemini_success else None,
+            'gemini_processing.result': gemini_result,
+            'gemini_processing.extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'gemini_processing.error': gemini_result.get('error') if not gemini_success else None,
+            'gemini_processing.reprocessed_at': datetime.utcnow()
+        }
+        
+        uploads_collection.update_one(
+            {'_id': ObjectId(upload_id)},
+            {'$set': update_data}
+        )
+        
+        return jsonify({
+            'success': True,
+            'upload_id': upload_id,
+            'reprocessing_success': gemini_success,
+            'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'error': gemini_result.get('error') if not gemini_success else None,
+            'reprocessed_at': datetime.utcnow().isoformat()
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Reprocess error: {str(e)}")
+        return jsonify({'error': 'Reprocessing failed', 'details': str(e)}), 500
 
 @uploads_bp.route('/image/<file_id>', methods=['GET'])
 def get_image(file_id):
