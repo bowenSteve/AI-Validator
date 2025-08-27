@@ -1,15 +1,9 @@
 import React, { useState } from 'react';
 import { Sun, Moon } from 'lucide-react';
 import Sidebar from '../components/Sidebar';
-import Dashboard from '../features/Dashboard';
-
+import Dashboard from '../features/dashboard/Dashboard';
+import History from '../features/history/History'
 // Placeholder components for other sections
-const HistoryComponent = ({ isDark }) => (
-  <div className="h-full p-6">
-    <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">History</h1>
-    <p className="text-gray-600 dark:text-gray-400">View your comparison history here</p>
-  </div>
-);
 
 const TasksComponent = ({ isDark }) => (
   <div className="h-full p-6">
@@ -41,7 +35,7 @@ function Main() {
       case 'Dashboard':
         return <Dashboard isDark={isDark} />;
       case 'History':
-        return <HistoryComponent isDark={isDark} />;
+        return <History isDark={isDark} />;
       case 'Tasks':
         return <TasksComponent isDark={isDark} />;
       case 'Settings':
@@ -77,7 +71,7 @@ function Main() {
         />
         
         {/* Main Content - Now occupies full remaining area */}
-        <div className={`flex-1 ${isDark ? 'text-white' : 'text-gray-900'} overflow-auto`}>
+        <div className={`flex-1 ${isDark ? 'text-white mt-5' : 'text-gray-900'} overflow-auto`}>
           {renderActiveComponent()}
         </div>
       </div>

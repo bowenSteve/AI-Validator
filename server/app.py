@@ -21,9 +21,11 @@ jwt = JWTManager(app)
 # Import and register blueprints
 from routes.uploads import uploads_bp
 from routes.simple_validation import simple_validation_bp
+from routes.history import history_bp
 
 app.register_blueprint(uploads_bp, url_prefix='/api/uploads')
 app.register_blueprint(simple_validation_bp)
+app.register_blueprint(history_bp,url_prefix='/api/history')
 
 @app.route('/health', methods=['GET'])
 def health_check():
