@@ -1,4 +1,10 @@
 import { X, Calendar, FileText, Image, CheckSquare, AlertTriangle, Clock } from 'lucide-react';
+import { FaFileExport } from "react-icons/fa6";
+
+
+
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
+
 
 function SessionDetailsModal({ session, isOpen, onClose, isDark }) {
     if (!isOpen || !session) return null;
@@ -48,6 +54,56 @@ function SessionDetailsModal({ session, isOpen, onClose, isDark }) {
             return isDark 
                 ? 'bg-red-900/20 text-red-400 border-red-800' 
                 : 'bg-red-100 text-red-700 border-red-200';
+        }
+    };
+
+    //export as pdf
+    const handleExport = async () => {
+        try {
+            // Extract the validation ID from the session
+            const validationId = session.validation?.comparison_id || session.comparison_id;
+            
+            if (!validationId) {
+                console.error('No validation ID found for export');
+                return;
+            }
+    
+            // Send POST request to export endpoint
+            const response = await fetch(`${API_URL}/api/history/export`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    validation_id: validationId
+                })
+            });
+    
+            if (!response.ok) {
+                throw new Error(`Export failed: ${response.status}`);
+            }
+    
+            // Get the PDF blob from response
+            const blob = await response.blob();
+            
+            // Create download link
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `validation_report_${validationId.slice(-8)}_${new Date().toISOString().split('T')[0]}.pdf`;
+            
+            // Trigger download
+            document.body.appendChild(link);
+            link.click();
+            
+            // Cleanup
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+            
+        } catch (error) {
+            console.error('Export failed:', error);
+            // You could add a toast notification here or set an error state
+            alert('Failed to export validation report. Please try again.');
         }
     };
 
@@ -478,7 +534,19 @@ function SessionDetailsModal({ session, isOpen, onClose, isDark }) {
                                             </div>
                                         </div>
                                     )}
-                                    
+                                        {/* export results */}
+                                        <div>
+                                    <div className='text-right'> 
+                                        <button onClick={handleExport} className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors duration-150 flex items-center space-x-2 ml-auto ${
+                                            isDark 
+                                                ? 'bg-gray-700 hover:bg-gray-600 text-gray-300 border border-gray-600' 
+                                                : 'bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200'
+                                        }`}>
+                                            <FaFileExport />
+                                        </button>
+                                    </div>
+                                </div>
+                                                                    
                                     {/* Recommendations */}
                                     {session.validation.validation_result.recommendations && session.validation.validation_result.recommendations.length > 0 && (
                                         <div className="mt-6 pt-6 border-t border-gray-600">
