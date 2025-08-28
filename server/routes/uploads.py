@@ -117,6 +117,9 @@ def handle_image_upload(file_data, filename, content_type, image_type):
             'processed_at': datetime.utcnow() if gemini_success else None,
             'result': gemini_result,
             'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
+            'has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
+            'validation': gemini_result.get('validation', {}) if gemini_success else {},
             'error': gemini_result.get('error') if not gemini_success else None
         }
     }
@@ -134,6 +137,9 @@ def handle_image_upload(file_data, filename, content_type, image_type):
         'gemini_processing': {
             'success': gemini_success,
             'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
+            'has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
+            'validation': gemini_result.get('validation', {}) if gemini_success else {},
             'error': gemini_result.get('error') if not gemini_success else None,
             'processing_time': gemini_result.get('attempt', 1) if gemini_success else None
         }
@@ -498,6 +504,8 @@ def get_extracted_text(upload_id):
             'image_type': upload['image_type'],
             'filename': upload['original_filename'],
             'extracted_text': gemini_data.get('extracted_text', ''),
+            'confidence_score': gemini_data.get('confidence_score', 0.0),
+            'has_uncertainties': gemini_data.get('has_uncertainties', False),
             'processing_success': gemini_data.get('processed', False),
             'processed_at': gemini_data.get('processed_at'),
             'error': gemini_data.get('error')
@@ -541,6 +549,8 @@ def reprocess_with_gemini(upload_id):
             'gemini_processing.processed_at': datetime.utcnow() if gemini_success else None,
             'gemini_processing.result': gemini_result,
             'gemini_processing.extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'gemini_processing.confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
+            'gemini_processing.has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
             'gemini_processing.error': gemini_result.get('error') if not gemini_success else None,
             'gemini_processing.reprocessed_at': datetime.utcnow()
         }
@@ -555,6 +565,9 @@ def reprocess_with_gemini(upload_id):
             'upload_id': upload_id,
             'reprocessing_success': gemini_success,
             'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
+            'confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
+            'has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
+            'validation': gemini_result.get('validation', {}) if gemini_success else {},
             'error': gemini_result.get('error') if not gemini_success else None,
             'reprocessed_at': datetime.utcnow().isoformat()
         }), 200

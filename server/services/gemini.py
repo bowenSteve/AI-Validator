@@ -39,14 +39,41 @@ class GeminiService:
                 {
                     "parts": [
                         {
-                            "text": """Extract all text content from this image. Please provide:
-1. All visible text in the image
-2. Any UI labels, buttons, form fields, or interface elements
-3. Headers, titles, and navigation items
-4. Any error messages or notifications
-5. Organize the text logically (top to bottom, left to right)
+                            "text": """You are a highly accurate OCR specialist extracting text for business data validation. This text will be used for critical business processes, so ACCURACY IS PARAMOUNT.
 
-Please format the response as structured text that preserves the layout and hierarchy."""
+CRITICAL REQUIREMENTS:
+- Company names must be spelled EXACTLY as shown (e.g., "LIGHTNING" not "LIGHTENING")
+- Addresses must include all numbers, street names, and unit numbers precisely
+- Pay special attention to easily confused letters: I/L, O/0, S/5, G/6, B/8
+- Double-check spelling of business-critical terms
+
+EXTRACT ALL TEXT INCLUDING:
+1. Company/Organization names (verify spelling carefully)
+2. Complete addresses with all components
+3. Names, titles, and contact information
+4. Form labels, buttons, and UI elements
+5. Headers, navigation, and section titles
+6. Error messages or status indicators
+
+FORMAT REQUIREMENTS:
+- Preserve original layout and hierarchy
+- Use consistent spacing and line breaks
+- Group related information together
+- List items in logical reading order (top-to-bottom, left-to-right)
+
+CONFIDENCE INDICATORS:
+- If any text is unclear or ambiguous, note: [UNCERTAIN: text]
+- For partially visible text, note: [PARTIAL: text]
+- Maintain high confidence in business names and addresses
+
+EXAMPLE OUTPUT FORMAT:
+Organization Name: [EXACT NAME HERE]
+Address: [COMPLETE ADDRESS]
+City: [CITY NAME]
+State: [STATE]
+Postal Code: [ZIP CODE]
+
+Remember: Business validation depends on your accuracy. When in doubt, be conservative but precise."""
                         },
                         {
                             "inline_data": {
@@ -86,9 +113,19 @@ Please format the response as structured text that preserves the layout and hier
                     extracted_text = self._parse_gemini_response(result)
                     logger.info(f"Gemini response: Extracted {len(extracted_text)} characters of text from {image_type} image")
                     
+                    # Parse confidence indicators
+                    confidence_score = self._calculate_confidence_score(extracted_text)
+                    has_uncertainties = "[UNCERTAIN:" in extracted_text or "[PARTIAL:" in extracted_text
+                    
+                    # Additional business text validation
+                    validation_result = self.validate_business_text(extracted_text)
+                    
                     success_result = {
                         "success": True,
                         "extracted_text": extracted_text,
+                        "confidence_score": confidence_score,
+                        "has_uncertainties": has_uncertainties,
+                        "validation": validation_result,
                         "raw_response": result,
                         "image_type": image_type,
                         "processed_at": datetime.utcnow().isoformat(),
@@ -172,6 +209,90 @@ Please format the response as structured text that preserves the layout and hier
         except Exception as e:
             logger.error(f"Error parsing Gemini response: {str(e)}")
             return f"Error parsing response: {str(e)}"
+    
+    def _calculate_confidence_score(self, extracted_text: str) -> float:
+        """
+        Calculate confidence score based on uncertainty markers and text quality
+        """
+        if not extracted_text:
+            return 0.0
+            
+        total_length = len(extracted_text)
+        if total_length == 0:
+            return 0.0
+        
+        # Count uncertainty markers
+        uncertain_markers = extracted_text.count("[UNCERTAIN:")
+        partial_markers = extracted_text.count("[PARTIAL:")
+        
+        # Calculate penalty for uncertainty markers
+        uncertainty_penalty = (uncertain_markers * 10) + (partial_markers * 5)
+        
+        # Base confidence starts at 100%
+        confidence = 100.0
+        
+        # Apply uncertainty penalties
+        confidence = max(0.0, confidence - uncertainty_penalty)
+        
+        # Additional quality indicators
+        if len(extracted_text.strip()) < 10:
+            confidence *= 0.5  # Very short text is suspicious
+            
+        # Check for structured output (good sign)
+        structured_indicators = [
+            "Organization Name:",
+            "Address:",
+            "City:",
+            "State:",
+            "Postal Code:"
+        ]
+        
+        structure_score = sum(1 for indicator in structured_indicators if indicator in extracted_text)
+        if structure_score > 2:
+            confidence = min(100.0, confidence * 1.1)  # Boost for good structure
+        
+        return round(confidence, 2)
+    
+    def validate_business_text(self, extracted_text: str) -> Dict[str, Any]:
+        """
+        Additional validation for business-critical text
+        """
+        validation_issues = []
+        suggestions = []
+        
+        # Check for common OCR confusion patterns
+        confusion_patterns = {
+            'LIGHTENING': 'LIGHTNING',
+            'LIGHTINING': 'LIGHTNING', 
+            'LIGTENING': 'LIGHTNING',
+            'LIGHTNENG': 'LIGHTNING'
+        }
+        
+        text_upper = extracted_text.upper()
+        for wrong, correct in confusion_patterns.items():
+            if wrong in text_upper:
+                validation_issues.append(f"Possible OCR error: '{wrong}' should likely be '{correct}'")
+                suggestions.append(f"Double-check if '{wrong}' should be '{correct}'")
+        
+        # Check for suspicious character patterns
+        suspicious_patterns = [
+            (r'\d{1}[IL]{1}', "Number followed by I/L might be address confusion"),
+            (r'[IL]{1}\d{1}', "I/L followed by number might be address confusion"), 
+            (r'[O0]{2,}', "Multiple O/0 characters should be verified"),
+            (r'\s{3,}', "Excessive spacing might indicate OCR issues")
+        ]
+        
+        import re
+        for pattern, message in suspicious_patterns:
+            if re.search(pattern, extracted_text):
+                validation_issues.append(message)
+        
+        return {
+            'has_validation_issues': len(validation_issues) > 0,
+            'validation_issues': validation_issues,
+            'suggestions': suggestions,
+            'needs_human_review': len(validation_issues) > 2
+        }
 
 # Global instance
 gemini_service = GeminiService()
