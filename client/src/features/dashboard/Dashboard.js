@@ -278,11 +278,22 @@ function Dashboard({ isDark }) {
       return;
     }
 
-    const firstMainImage = mainImages[0];
-    const firstSecondaryImage = secondaryImages[0];
+    // Get all upload IDs from images that were successfully processed
+    const mainUploadIds = mainImages
+      .filter(img => img.upload_id && img.gemini_processing?.success)
+      .map(img => img.upload_id);
+      
+    const secondaryUploadIds = secondaryImages
+      .filter(img => img.upload_id && img.gemini_processing?.success)
+      .map(img => img.upload_id);
 
-    if (!firstMainImage.upload_id || !firstSecondaryImage.upload_id) {
-      setValidationError('Images must be successfully processed before validation');
+    if (mainUploadIds.length === 0) {
+      setValidationError('No successfully processed main images found');
+      return;
+    }
+
+    if (secondaryUploadIds.length === 0) {
+      setValidationError('No successfully processed secondary images found');
       return;
     }
 
@@ -297,8 +308,8 @@ function Dashboard({ isDark }) {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          main_upload_id: firstMainImage.upload_id,
-          secondary_upload_id: firstSecondaryImage.upload_id,
+          main_upload_ids: mainUploadIds,
+          secondary_upload_ids: secondaryUploadIds,
         }),
       });
 
@@ -309,7 +320,7 @@ function Dashboard({ isDark }) {
       }
 
       setValidationResult(result.validation_result);
-      console.log('Validation completed:', result);
+      console.log('Multi-image validation completed:', result);
 
     } catch (error) {
       console.error('Validation error:', error);

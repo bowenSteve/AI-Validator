@@ -21,58 +21,71 @@ def get_db():
 @simple_validation_bp.route('/compare/gemini', methods=['POST'])
 def compare_uploads_with_gemini():
     """
-    Compare two uploaded images using Gemini AI for intelligent validation
-    Expects: JSON with 'main_upload_id' and 'secondary_upload_id'
+    Compare uploaded images using Gemini AI for intelligent validation
+    Expects: JSON with 'main_upload_ids' and 'secondary_upload_ids' (arrays)
     """
     try:
         data = request.get_json()
         
-        if not data or 'main_upload_id' not in data or 'secondary_upload_id' not in data:
+        if not data or 'main_upload_ids' not in data or 'secondary_upload_ids' not in data:
             return jsonify({
-                'error': 'Both main_upload_id and secondary_upload_id are required'
+                'error': 'Both main_upload_ids and secondary_upload_ids arrays are required'
             }), 400
         
-        main_upload_id = data['main_upload_id']
-        secondary_upload_id = data['secondary_upload_id']
+        main_upload_ids = data['main_upload_ids']
+        secondary_upload_ids = data['secondary_upload_ids']
         
-        # Get the upload records from database
+        if not isinstance(main_upload_ids, list) or not isinstance(secondary_upload_ids, list):
+            return jsonify({
+                'error': 'upload_ids must be arrays'
+            }), 400
+        
+        # Get database connection
         db = get_db()
         uploads_collection = db.uploads
         
-        main_upload = uploads_collection.find_one({
-            '_id': ObjectId(main_upload_id),
-            'image_type': 'main'
-        })
+        # Fetch and combine text from main images
+        main_combined_text = ""
+        for upload_id in main_upload_ids:
+            upload = uploads_collection.find_one({
+                '_id': ObjectId(upload_id),
+                'image_type': 'main'
+            })
+            if upload:
+                extracted_text = upload.get('gemini_processing', {}).get('extracted_text', '')
+                if extracted_text:
+                    main_combined_text += extracted_text + "\n\n"
         
-        secondary_upload = uploads_collection.find_one({
-            '_id': ObjectId(secondary_upload_id),
-            'image_type': 'secondary'
-        })
+        # Fetch and combine text from secondary images
+        secondary_combined_text = ""
+        for upload_id in secondary_upload_ids:
+            upload = uploads_collection.find_one({
+                '_id': ObjectId(upload_id),
+                'image_type': 'secondary'
+            })
+            if upload:
+                extracted_text = upload.get('gemini_processing', {}).get('extracted_text', '')
+                if extracted_text:
+                    secondary_combined_text += extracted_text + "\n\n"
         
-        if not main_upload:
-            return jsonify({'error': 'Main upload not found'}), 404
-        
-        if not secondary_upload:
-            return jsonify({'error': 'Secondary upload not found'}), 404
-        
-        # Extract the text from both uploads
-        main_text = main_upload.get('gemini_processing', {}).get('extracted_text', '')
-        secondary_text = secondary_upload.get('gemini_processing', {}).get('extracted_text', '')
-        
-        if not main_text:
+        # Validation checks
+        if not main_combined_text.strip():
             return jsonify({
-                'error': 'No text extracted from main image. Please ensure the image was processed successfully.'
+                'error': 'No text extracted from main images. Please ensure images were processed successfully.'
             }), 400
         
-        if not secondary_text:
+        if not secondary_combined_text.strip():
             return jsonify({
-                'error': 'No text extracted from secondary image. Please ensure the image was processed successfully.'
+                'error': 'No text extracted from secondary images. Please ensure images were processed successfully.'
             }), 400
         
-        logger.info(f"Starting Gemini validation between main upload {main_upload_id} and secondary upload {secondary_upload_id}")
+        logger.info(f"Starting Gemini validation with {len(main_upload_ids)} main images and {len(secondary_upload_ids)} secondary images")
         
-        # Perform the Gemini validation
-        success, validation_result = gemini_validator.validate_data_transfer(main_text, secondary_text)
+        # Perform Gemini validation with combined text
+        success, validation_result = gemini_validator.validate_data_transfer(
+            main_combined_text.strip(), 
+            secondary_combined_text.strip()
+        )
         
         if not success:
             return jsonify({
@@ -80,34 +93,36 @@ def compare_uploads_with_gemini():
                 'details': validation_result.get('error', 'Unknown error')
             }), 500
         
-        # Store the comparison result in database
+        # Store comparison result
         comparison_record = {
-            'main_upload_id': ObjectId(main_upload_id),
-            'secondary_upload_id': ObjectId(secondary_upload_id),
+            'main_upload_ids': [ObjectId(id) for id in main_upload_ids],
+            'secondary_upload_ids': [ObjectId(id) for id in secondary_upload_ids],
             'comparison_date': datetime.utcnow(),
-            'comparison_type': 'gemini_validation',
+            'comparison_type': 'gemini_validation_multi',
             'validation_result': validation_result
         }
         
-        # Store in comparisons collection
         comparisons_collection = db.comparisons
         result = comparisons_collection.insert_one(comparison_record)
         
-        logger.info(f"Gemini validation completed with accuracy: {validation_result.get('accuracy_score', 0)}%")
+        logger.info(f"Multi-image Gemini validation completed with accuracy: {validation_result.get('accuracy_score', 0)}%")
         
         return jsonify({
             'success': True,
             'comparison_id': str(result.inserted_id),
-            'validation_result': validation_result
+            'validation_result': validation_result,
+            'images_processed': {
+                'main_count': len(main_upload_ids),
+                'secondary_count': len(secondary_upload_ids)
+            }
         }), 200
         
     except Exception as e:
-        current_app.logger.error(f"Gemini validation error: {str(e)}")
+        current_app.logger.error(f"Multi-image Gemini validation error: {str(e)}")
         return jsonify({
             'error': 'Validation failed',
             'details': str(e)
         }), 500
-
 @simple_validation_bp.route('/compare', methods=['POST'])
 def compare_uploads():
     """
