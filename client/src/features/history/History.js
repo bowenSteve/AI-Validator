@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { History as HistoryIcon, CheckSquare, AlertTriangle, Clock, Eye, Calendar, FileText, Image } from 'lucide-react';
+import { History as HistoryIcon, CheckSquare, AlertTriangle, Clock, Eye, Calendar, FileText, Image, Trash2 } from 'lucide-react';
 import SessionDetailsModal from './components/SessionDetailsModal';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
@@ -151,6 +151,44 @@ function History({ isDark }) {
         setSelectedSession(null);
     };
     
+    const handleDeleteSession = async (session) => {
+        if (!window.confirm('Are you sure you want to delete this session? This action cannot be undone.')) {
+            return;
+        }
+        
+        try {
+            if (session.type === 'comparison') {
+                // Delete comparison and associated uploads
+                const deletePromises = [
+                    fetch(`${API_URL}/api/history/uploads/${session.mainUpload.upload_id}`, { method: 'DELETE' }),
+                    fetch(`${API_URL}/api/history/uploads/${session.secondaryUpload.upload_id}`, { method: 'DELETE' }),
+                    fetch(`${API_URL}/api/validation/result/${session.validation.comparison_id}`, { method: 'DELETE' })
+                ];
+                
+                const responses = await Promise.all(deletePromises);
+                
+                // Check if all deletes were successful
+                const failedDeletes = responses.filter(response => !response.ok);
+                if (failedDeletes.length > 0) {
+                    throw new Error(`Failed to delete ${failedDeletes.length} items`);
+                }
+            } else {
+                // Delete standalone upload
+                const response = await fetch(`${API_URL}/api/history/uploads/${session.upload.upload_id}`, { method: 'DELETE' });
+                if (!response.ok) {
+                    throw new Error('Failed to delete upload');
+                }
+            }
+            
+            // Remove session from state
+            setComparisonSessions(prev => prev.filter(s => s.id !== session.id));
+            
+        } catch (error) {
+            console.error('Failed to delete session:', error);
+            alert('Failed to delete session. Please try again.');
+        }
+    };
+    
     const getSessionName = (session) => {
         const timestamp = new Date(session.date).getTime();
         return session.type === 'comparison' 
@@ -292,6 +330,17 @@ function History({ isDark }) {
                                                         title="View session details"
                                                     >
                                                         <Eye size={16} />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDeleteSession(session)}
+                                                        className={`p-2 rounded-lg transition-colors duration-150 ${
+                                                            isDark 
+                                                                ? 'text-red-400 hover:text-red-300 hover:bg-red-900/20' 
+                                                                : 'text-red-500 hover:text-red-700 hover:bg-red-50'
+                                                        }`}
+                                                        title="Delete session"
+                                                    >
+                                                        <Trash2 size={16} />
                                                     </button>
                                                 </div>
                                             </div>
@@ -446,17 +495,30 @@ function History({ isDark }) {
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <button
-                                                    onClick={() => handleViewSession(session)}
-                                                    className={`p-2 rounded-lg transition-colors duration-150 ${
-                                                        isDark 
-                                                            ? 'text-gray-400 hover:text-white hover:bg-gray-700' 
-                                                            : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
-                                                    }`}
-                                                    title="View session details"
-                                                >
-                                                    <Eye size={16} />
-                                                </button>
+                                                <div className="flex items-center space-x-2">
+                                                    <button
+                                                        onClick={() => handleViewSession(session)}
+                                                        className={`p-2 rounded-lg transition-colors duration-150 ${
+                                                            isDark 
+                                                                ? 'text-gray-400 hover:text-white hover:bg-gray-700' 
+                                                                : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                                                        }`}
+                                                        title="View session details"
+                                                    >
+                                                        <Eye size={16} />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDeleteSession(session)}
+                                                        className={`p-2 rounded-lg transition-colors duration-150 ${
+                                                            isDark 
+                                                                ? 'text-red-400 hover:text-red-300 hover:bg-red-900/20' 
+                                                                : 'text-red-500 hover:text-red-700 hover:bg-red-50'
+                                                        }`}
+                                                        title="Delete session"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </div>
                                             </div>
                                             
                                             <div className={`p-4 rounded-lg border ${

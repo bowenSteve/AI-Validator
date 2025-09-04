@@ -10,6 +10,7 @@
 /server/.env
 # production
 /build
+/server/knowledge/
 improvements.txt
 # misc
 .DS_Store

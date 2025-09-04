@@ -400,3 +400,32 @@ def get_comparison_result(comparison_id):
     except Exception as e:
         current_app.logger.error(f"Get comparison result error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve comparison result'}), 500
+
+@simple_validation_bp.route('/result/<comparison_id>', methods=['DELETE'])
+def delete_comparison_result(comparison_id):
+    """Delete a comparison result by ID"""
+    try:
+        db = get_db()
+        comparisons_collection = db.comparisons
+        
+        # Find the comparison
+        comparison = comparisons_collection.find_one({'_id': ObjectId(comparison_id)})
+        if not comparison:
+            return jsonify({'error': 'Comparison result not found'}), 404
+        
+        # Delete the comparison record
+        result = comparisons_collection.delete_one({'_id': ObjectId(comparison_id)})
+        
+        if result.deleted_count == 0:
+            return jsonify({'error': 'Failed to delete comparison result'}), 500
+        
+        logger.info(f"Deleted comparison result: {comparison_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Comparison result deleted successfully'
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Delete comparison result error: {str(e)}")
+        return jsonify({'error': 'Failed to delete comparison result'}), 500
