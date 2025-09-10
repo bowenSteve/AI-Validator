@@ -5,8 +5,6 @@ import SessionDetailsModal from './components/SessionDetailsModal';
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
 
 function History({ isDark }) {
-    const [uploads, setUploads] = useState([]);
-    const [validations, setValidations] = useState([]);
     const [comparisonSessions, setComparisonSessions] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -34,9 +32,6 @@ function History({ isDark }) {
                 const allUploads = uploadsData.uploads || [];
                 const allValidations = validationsData.validations || [];
                 
-                setUploads(allUploads);
-                setValidations(allValidations);
-                
                 // Group uploads by their validation sessions
                 const sessions = createComparisonSessions(allUploads, allValidations);
                 setComparisonSessions(sessions);
@@ -58,24 +53,52 @@ function History({ isDark }) {
         
         // Create sessions from validations (comparisons)
         validations.forEach(validation => {
+            // Handle both old single-image format and new multi-image format
+            let mainUploads = [];
+            let secondaryUploads = [];
+            
             if (validation.main_upload_id && validation.secondary_upload_id) {
+                // Old format: single main_upload_id and secondary_upload_id
                 const mainUpload = uploads.find(u => u.upload_id === validation.main_upload_id);
                 const secondaryUpload = uploads.find(u => u.upload_id === validation.secondary_upload_id);
+                if (mainUpload) mainUploads.push(mainUpload);
+                if (secondaryUpload) secondaryUploads.push(secondaryUpload);
+            } else if (validation.comparison_type === 'gemini_validation_multi') {
+                // New format: find uploads by matching timestamps and types
+                // Get uploads from around the validation time (within 5 minutes)
+                const validationTime = new Date(validation.comparison_date);
+                const timeWindow = 5 * 60 * 1000; // 5 minutes in milliseconds
                 
-                if (mainUpload && secondaryUpload) {
-                    sessions.push({
-                        id: validation.comparison_id,
-                        type: 'comparison',
-                        date: validation.comparison_date,
-                        mainUpload,
-                        secondaryUpload,
-                        validation,
-                        accuracy: validation.accuracy_score || 0
-                    });
-                    
-                    usedUploadIds.add(validation.main_upload_id);
-                    usedUploadIds.add(validation.secondary_upload_id);
-                }
+                mainUploads = uploads.filter(u => {
+                    const uploadTime = new Date(u.upload_date);
+                    return u.image_type === 'main' && 
+                           Math.abs(uploadTime - validationTime) <= timeWindow;
+                });
+                
+                secondaryUploads = uploads.filter(u => {
+                    const uploadTime = new Date(u.upload_date);
+                    return u.image_type === 'secondary' && 
+                           Math.abs(uploadTime - validationTime) <= timeWindow;
+                });
+            }
+            
+            // Only create session if we have at least one main and one secondary upload
+            if (mainUploads.length > 0 && secondaryUploads.length > 0) {
+                sessions.push({
+                    id: validation.comparison_id,
+                    type: 'comparison',
+                    date: validation.comparison_date,
+                    mainUpload: mainUploads[0], // Use first main upload for display
+                    secondaryUpload: secondaryUploads[0], // Use first secondary upload for display
+                    mainUploads: mainUploads, // Store all main uploads
+                    secondaryUploads: secondaryUploads, // Store all secondary uploads
+                    validation,
+                    accuracy: validation.accuracy_score || 0
+                });
+                
+                // Mark all used uploads
+                mainUploads.forEach(u => usedUploadIds.add(u.upload_id));
+                secondaryUploads.forEach(u => usedUploadIds.add(u.upload_id));
             }
         });
         
@@ -160,10 +183,36 @@ function History({ isDark }) {
             if (session.type === 'comparison') {
                 // Delete comparison and associated uploads
                 const deletePromises = [
-                    fetch(`${API_URL}/api/history/uploads/${session.mainUpload.upload_id}`, { method: 'DELETE' }),
-                    fetch(`${API_URL}/api/history/uploads/${session.secondaryUpload.upload_id}`, { method: 'DELETE' }),
                     fetch(`${API_URL}/api/validation/result/${session.validation.comparison_id}`, { method: 'DELETE' })
                 ];
+                
+                // Delete all main uploads
+                if (session.mainUploads && session.mainUploads.length > 0) {
+                    session.mainUploads.forEach(upload => {
+                        deletePromises.push(
+                            fetch(`${API_URL}/api/history/uploads/${upload.upload_id}`, { method: 'DELETE' })
+                        );
+                    });
+                } else if (session.mainUpload) {
+                    // Fallback for old format
+                    deletePromises.push(
+                        fetch(`${API_URL}/api/history/uploads/${session.mainUpload.upload_id}`, { method: 'DELETE' })
+                    );
+                }
+                
+                // Delete all secondary uploads
+                if (session.secondaryUploads && session.secondaryUploads.length > 0) {
+                    session.secondaryUploads.forEach(upload => {
+                        deletePromises.push(
+                            fetch(`${API_URL}/api/history/uploads/${upload.upload_id}`, { method: 'DELETE' })
+                        );
+                    });
+                } else if (session.secondaryUpload) {
+                    // Fallback for old format
+                    deletePromises.push(
+                        fetch(`${API_URL}/api/history/uploads/${session.secondaryUpload.upload_id}`, { method: 'DELETE' })
+                    );
+                }
                 
                 const responses = await Promise.all(deletePromises);
                 
@@ -356,7 +405,9 @@ function History({ isDark }) {
                                                         }`}></div>
                                                         <span className={`text-sm font-medium ${
                                                             isDark ? 'text-blue-300' : 'text-blue-700'
-                                                        }`}>Util Screenshot</span>
+                                                        }`}>
+                                                            Util Screenshot{session.mainUploads && session.mainUploads.length > 1 ? ` (${session.mainUploads.length})` : ''}
+                                                        </span>
                                                     </div>
                                                     <div className="flex items-start space-x-3">
                                                         <div className={`w-16 h-16 rounded-lg flex items-center justify-center ${
@@ -403,7 +454,9 @@ function History({ isDark }) {
                                                         }`}></div>
                                                         <span className={`text-sm font-medium ${
                                                             isDark ? 'text-purple-300' : 'text-purple-700'
-                                                        }`}>Website Screenshot</span>
+                                                        }`}>
+                                                            Website Screenshot{session.secondaryUploads && session.secondaryUploads.length > 1 ? ` (${session.secondaryUploads.length})` : ''}
+                                                        </span>
                                                     </div>
                                                     <div className="flex items-start space-x-3">
                                                         <div className={`w-16 h-16 rounded-lg flex items-center justify-center ${
