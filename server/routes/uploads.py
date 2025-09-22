@@ -10,7 +10,7 @@ import io
 import logging
 
 # Import SQLAlchemy models
-from models import db, Upload
+from .models import db, Upload
 
 # Import Gemini service
 from services.gemini import gemini_service

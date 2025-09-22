@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import func, and_, or_
 
 # Import SQLAlchemy models
-from models import db, Upload, Comparison
+from .models import db, Upload, Comparison
 
 history_bp = Blueprint('History', __name__)
 logger = logging.getLogger(__name__)

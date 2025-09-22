@@ -15,18 +15,20 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure app with PostgreSQL (fallback to SQLite for development)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+database_url = os.getenv(
     'DATABASE_URL',
-    'sqlite:///middesk_validator.db'  # SQLite fallback for development
+    # 'sqlite:///middesk_validator.db'  # SQLite fallback for development
     # 'postgresql://postgres:password@localhost/middesk_validator'  # Use this for production
 )
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+print(f"🔗 Database URL: {database_url}")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'fsbdgfnhgvjnvhmvh' + str(random.randint(1, 1000000000000)))
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'JKSRVHJVFBSRDFV' + str(random.randint(1, 1000000000000)))
 
 # Initialize extensions
-from models import db
+from .models import db
 db.init_app(app)
 
 CORS(app)
