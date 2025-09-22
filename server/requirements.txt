@@ -10,8 +10,8 @@ python-dotenv==1.0.0
 # HTTP requests for Gemini API
 requests==2.31.0
 
-# Database dependencies
-sqlalchemy==2.0.23
+# Database dependencies (Python 3.13 compatible)
+sqlalchemy>=2.0.35
 # PostgreSQL (uncomment when ready): psycopg2-binary==2.9.7
 
 # Image processing and validation

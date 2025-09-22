@@ -4,7 +4,7 @@ import logging
 import os
 
 # Import SQLAlchemy models
-from .models import db, Upload, Comparison
+from models import db, Upload, Comparison
 
 # Import our simple text comparison service
 from services.simple_text_comparison import simple_text_comparison

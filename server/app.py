@@ -28,13 +28,21 @@ app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=1)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'JKSRVHJVFBSRDFV' + str(random.randint(1, 1000000000000)))
 
 # Initialize extensions
-from .models import db
+from models import db
 db.init_app(app)
 
 CORS(app)
 jwt = JWTManager(app)
 bcrypt = Bcrypt(app)
 migrate = Migrate(app, db)
+
+# Create database tables
+with app.app_context():
+    try:
+        db.create_all()
+        print("✅ Database tables created/verified successfully!")
+    except Exception as e:
+        print(f"⚠️ Database table creation warning: {e}")
 
 # Import and register blueprints
 from routes.uploads import uploads_bp
