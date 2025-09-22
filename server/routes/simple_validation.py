@@ -1,9 +1,10 @@
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
-import pymongo
-from bson import ObjectId
 import logging
 import os
+
+# Import SQLAlchemy models
+from models import db, Upload, Comparison
 
 # Import our simple text comparison service
 from services.simple_text_comparison import simple_text_comparison
@@ -11,11 +12,6 @@ from services.gemini_validator import gemini_validator
 
 simple_validation_bp = Blueprint('SimpleValidation', __name__, url_prefix='/api/validation')
 logger = logging.getLogger(__name__)
-
-def get_db():
-    """Get database connection"""
-    client = pymongo.MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
-    return client[os.getenv('MONGODB_DB_NAME', 'middesk')]
 
 
 @simple_validation_bp.route('/compare/gemini', methods=['POST'])
@@ -40,33 +36,19 @@ def compare_uploads_with_gemini():
                 'error': 'upload_ids must be arrays'
             }), 400
         
-        # Get database connection
-        db = get_db()
-        uploads_collection = db.uploads
-        
         # Fetch and combine text from main images
         main_combined_text = ""
         for upload_id in main_upload_ids:
-            upload = uploads_collection.find_one({
-                '_id': ObjectId(upload_id),
-                'image_type': 'main'
-            })
-            if upload:
-                extracted_text = upload.get('gemini_processing', {}).get('extracted_text', '')
-                if extracted_text:
-                    main_combined_text += extracted_text + "\n\n"
-        
+            upload = Upload.query.filter_by(id=upload_id, image_type='main').first()
+            if upload and upload.gemini_extracted_text:
+                main_combined_text += upload.gemini_extracted_text + "\n\n"
+
         # Fetch and combine text from secondary images
         secondary_combined_text = ""
         for upload_id in secondary_upload_ids:
-            upload = uploads_collection.find_one({
-                '_id': ObjectId(upload_id),
-                'image_type': 'secondary'
-            })
-            if upload:
-                extracted_text = upload.get('gemini_processing', {}).get('extracted_text', '')
-                if extracted_text:
-                    secondary_combined_text += extracted_text + "\n\n"
+            upload = Upload.query.filter_by(id=upload_id, image_type='secondary').first()
+            if upload and upload.gemini_extracted_text:
+                secondary_combined_text += upload.gemini_extracted_text + "\n\n"
         
         # Validation checks
         if not main_combined_text.strip():
@@ -94,22 +76,22 @@ def compare_uploads_with_gemini():
             }), 500
         
         # Store comparison result
-        comparison_record = {
-            'main_upload_ids': [ObjectId(id) for id in main_upload_ids],
-            'secondary_upload_ids': [ObjectId(id) for id in secondary_upload_ids],
-            'comparison_date': datetime.utcnow(),
-            'comparison_type': 'gemini_validation_multi',
-            'validation_result': validation_result
-        }
-        
-        comparisons_collection = db.comparisons
-        result = comparisons_collection.insert_one(comparison_record)
+        comparison = Comparison(
+            main_upload_ids=main_upload_ids,
+            secondary_upload_ids=secondary_upload_ids,
+            comparison_date=datetime.utcnow(),
+            comparison_type='gemini_validation_multi',
+            validation_result=validation_result
+        )
+
+        db.session.add(comparison)
+        db.session.commit()
         
         logger.info(f"Multi-image Gemini validation completed with accuracy: {validation_result.get('accuracy_score', 0)}%")
         
         return jsonify({
             'success': True,
-            'comparison_id': str(result.inserted_id),
+            'comparison_id': str(comparison.id),
             'validation_result': validation_result,
             'images_processed': {
                 'main_count': len(main_upload_ids),
@@ -141,28 +123,18 @@ def compare_uploads():
         secondary_upload_id = data['secondary_upload_id']
         
         # Get the upload records from database
-        db = get_db()
-        uploads_collection = db.uploads
-        
-        main_upload = uploads_collection.find_one({
-            '_id': ObjectId(main_upload_id),
-            'image_type': 'main'
-        })
-        
-        secondary_upload = uploads_collection.find_one({
-            '_id': ObjectId(secondary_upload_id),
-            'image_type': 'secondary'
-        })
-        
+        main_upload = Upload.query.filter_by(id=main_upload_id, image_type='main').first()
+        secondary_upload = Upload.query.filter_by(id=secondary_upload_id, image_type='secondary').first()
+
         if not main_upload:
             return jsonify({'error': 'Main upload not found'}), 404
-        
+
         if not secondary_upload:
             return jsonify({'error': 'Secondary upload not found'}), 404
-        
+
         # Extract the text from both uploads
-        main_text = main_upload.get('gemini_processing', {}).get('extracted_text', '')
-        secondary_text = secondary_upload.get('gemini_processing', {}).get('extracted_text', '')
+        main_text = main_upload.gemini_extracted_text or ''
+        secondary_text = secondary_upload.gemini_extracted_text or ''
         
         if not main_text:
             return jsonify({
@@ -180,42 +152,43 @@ def compare_uploads():
         validation_result = simple_text_comparison.compare_texts(main_text, secondary_text)
         
         # Store the comparison result in database
-        comparison_record = {
-            'main_upload_id': ObjectId(main_upload_id),
-            'secondary_upload_id': ObjectId(secondary_upload_id),
-            'comparison_date': datetime.utcnow(),
-            'comparison_type': 'simple_text',
-            'validation_result': {
-                'overall_similarity': validation_result.overall_similarity,
-                'total_lines': validation_result.total_lines,
-                'matched_lines': validation_result.matched_lines,
-                'missing_lines': validation_result.missing_lines,
-                'extra_lines': validation_result.extra_lines,
-                'character_accuracy': validation_result.character_accuracy,
-                'word_accuracy': validation_result.word_accuracy,
-                'text_matches': [
-                    {
-                        'source_text': tm.source_text,
-                        'dest_text': tm.dest_text,
-                        'match_score': tm.match_score,
-                        'match_type': tm.match_type,
-                        'line_number': tm.line_number,
-                        'issues': tm.issues
-                    } for tm in validation_result.text_matches
-                ],
-                'recommendations': validation_result.recommendations
-            }
+        validation_dict = {
+            'overall_similarity': validation_result.overall_similarity,
+            'total_lines': validation_result.total_lines,
+            'matched_lines': validation_result.matched_lines,
+            'missing_lines': validation_result.missing_lines,
+            'extra_lines': validation_result.extra_lines,
+            'character_accuracy': validation_result.character_accuracy,
+            'word_accuracy': validation_result.word_accuracy,
+            'text_matches': [
+                {
+                    'source_text': tm.source_text,
+                    'dest_text': tm.dest_text,
+                    'match_score': tm.match_score,
+                    'match_type': tm.match_type,
+                    'line_number': tm.line_number,
+                    'issues': tm.issues
+                } for tm in validation_result.text_matches
+            ],
+            'recommendations': validation_result.recommendations
         }
-        
-        # Store in comparisons collection
-        comparisons_collection = db.comparisons
-        result = comparisons_collection.insert_one(comparison_record)
+
+        comparison = Comparison(
+            main_upload_id=main_upload_id,
+            secondary_upload_id=secondary_upload_id,
+            comparison_date=datetime.utcnow(),
+            comparison_type='simple_text',
+            validation_result=validation_dict
+        )
+
+        db.session.add(comparison)
+        db.session.commit()
         
         logger.info(f"Text comparison completed with overall similarity: {validation_result.overall_similarity:.1f}%")
         
         return jsonify({
             'success': True,
-            'comparison_id': str(result.inserted_id),
+            'comparison_id': str(comparison.id),
             'validation_result': {
                 'overall_similarity': round(validation_result.overall_similarity, 1),
                 'total_lines': validation_result.total_lines,
@@ -274,38 +247,38 @@ def compare_raw_text():
         
         # Optionally store the result (without upload references)
         if data.get('save_result', False):
-            db = get_db()
-            comparisons_collection = db.comparisons
-            
-            comparison_record = {
-                'comparison_type': 'simple_text_only',
-                'source_text': source_text,
-                'destination_text': destination_text,
-                'comparison_date': datetime.utcnow(),
-                'validation_result': {
-                    'overall_similarity': validation_result.overall_similarity,
-                    'total_lines': validation_result.total_lines,
-                    'matched_lines': validation_result.matched_lines,
-                    'missing_lines': validation_result.missing_lines,
-                    'extra_lines': validation_result.extra_lines,
-                    'character_accuracy': validation_result.character_accuracy,
-                    'word_accuracy': validation_result.word_accuracy,
-                    'text_matches': [
-                        {
-                            'source_text': tm.source_text,
-                            'dest_text': tm.dest_text,
-                            'match_score': tm.match_score,
-                            'match_type': tm.match_type,
-                            'line_number': tm.line_number,
-                            'issues': tm.issues
-                        } for tm in validation_result.text_matches
-                    ],
-                    'recommendations': validation_result.recommendations
-                }
+            validation_dict = {
+                'overall_similarity': validation_result.overall_similarity,
+                'total_lines': validation_result.total_lines,
+                'matched_lines': validation_result.matched_lines,
+                'missing_lines': validation_result.missing_lines,
+                'extra_lines': validation_result.extra_lines,
+                'character_accuracy': validation_result.character_accuracy,
+                'word_accuracy': validation_result.word_accuracy,
+                'text_matches': [
+                    {
+                        'source_text': tm.source_text,
+                        'dest_text': tm.dest_text,
+                        'match_score': tm.match_score,
+                        'match_type': tm.match_type,
+                        'line_number': tm.line_number,
+                        'issues': tm.issues
+                    } for tm in validation_result.text_matches
+                ],
+                'recommendations': validation_result.recommendations
             }
-            
-            result = comparisons_collection.insert_one(comparison_record)
-            comparison_id = str(result.inserted_id)
+
+            comparison = Comparison(
+                comparison_type='simple_text_only',
+                source_text=source_text,
+                destination_text=destination_text,
+                comparison_date=datetime.utcnow(),
+                validation_result=validation_dict
+            )
+
+            db.session.add(comparison)
+            db.session.commit()
+            comparison_id = str(comparison.id)
         else:
             comparison_id = None
         
@@ -353,27 +326,27 @@ def get_comparison_history():
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         
-        db = get_db()
-        comparisons_collection = db.comparisons
-        
         # Get total count
-        total = comparisons_collection.count_documents({})
-        
+        total = Comparison.query.count()
+
         # Get paginated results
-        comparisons = comparisons_collection.find({}).sort('comparison_date', -1).skip((page - 1) * limit).limit(limit)
-        
+        comparisons = Comparison.query.order_by(Comparison.comparison_date.desc())\
+            .offset((page - 1) * limit)\
+            .limit(limit)\
+            .all()
+
         comparison_list = []
         for comp in comparisons:
-            validation_result = comp.get('validation_result', {})
+            validation_result = comp.validation_result or {}
             comparison_list.append({
-                'comparison_id': str(comp['_id']),
-                'comparison_date': comp['comparison_date'].isoformat(),
+                'comparison_id': str(comp.id),
+                'comparison_date': comp.comparison_date.isoformat(),
                 'overall_similarity': validation_result.get('overall_similarity', 0),
                 'total_lines': validation_result.get('total_lines', 0),
                 'matched_lines': validation_result.get('matched_lines', 0),
-                'comparison_type': comp.get('comparison_type', 'simple_text'),
-                'main_upload_id': str(comp['main_upload_id']) if 'main_upload_id' in comp else None,
-                'secondary_upload_id': str(comp['secondary_upload_id']) if 'secondary_upload_id' in comp else None
+                'comparison_type': comp.comparison_type,
+                'main_upload_id': str(comp.main_upload_id) if comp.main_upload_id else None,
+                'secondary_upload_id': str(comp.secondary_upload_id) if comp.secondary_upload_id else None
             })
         
         return jsonify({
@@ -395,21 +368,18 @@ def get_comparison_history():
 def get_comparison_result(comparison_id):
     """Get detailed comparison result by ID"""
     try:
-        db = get_db()
-        comparisons_collection = db.comparisons
-        
-        comparison = comparisons_collection.find_one({'_id': ObjectId(comparison_id)})
+        comparison = Comparison.query.filter_by(id=comparison_id).first()
         if not comparison:
             return jsonify({'error': 'Comparison result not found'}), 404
-        
+
         return jsonify({
             'success': True,
             'comparison_id': comparison_id,
-            'comparison_date': comparison['comparison_date'].isoformat(),
-            'comparison_type': comparison.get('comparison_type', 'simple_text'),
-            'main_upload_id': str(comparison['main_upload_id']) if 'main_upload_id' in comparison else None,
-            'secondary_upload_id': str(comparison['secondary_upload_id']) if 'secondary_upload_id' in comparison else None,
-            'validation_result': comparison['validation_result']
+            'comparison_date': comparison.comparison_date.isoformat(),
+            'comparison_type': comparison.comparison_type,
+            'main_upload_id': str(comparison.main_upload_id) if comparison.main_upload_id else None,
+            'secondary_upload_id': str(comparison.secondary_upload_id) if comparison.secondary_upload_id else None,
+            'validation_result': comparison.validation_result
         }), 200
         
     except Exception as e:
@@ -420,19 +390,14 @@ def get_comparison_result(comparison_id):
 def delete_comparison_result(comparison_id):
     """Delete a comparison result by ID"""
     try:
-        db = get_db()
-        comparisons_collection = db.comparisons
-        
         # Find the comparison
-        comparison = comparisons_collection.find_one({'_id': ObjectId(comparison_id)})
+        comparison = Comparison.query.filter_by(id=comparison_id).first()
         if not comparison:
             return jsonify({'error': 'Comparison result not found'}), 404
-        
+
         # Delete the comparison record
-        result = comparisons_collection.delete_one({'_id': ObjectId(comparison_id)})
-        
-        if result.deleted_count == 0:
-            return jsonify({'error': 'Failed to delete comparison result'}), 500
+        db.session.delete(comparison)
+        db.session.commit()
         
         logger.info(f"Deleted comparison result: {comparison_id}")
         

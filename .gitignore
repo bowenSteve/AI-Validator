@@ -8,6 +8,8 @@
 # testing
 /coverage
 /server/.env
+/server/migrations/
+chrome-extension-conversion-plan.txt
 # production
 /build
 /server/knowledge/
