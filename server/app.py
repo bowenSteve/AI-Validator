@@ -31,7 +31,16 @@ app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'JKSRVHJVFBSRDFV' + str(rando
 from models import db
 db.init_app(app)
 
-CORS(app)
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "http://localhost:3000",
+            "https://localhost:3000",
+            "chrome-extension://*",
+            "*"
+        ]
+    }
+})
 jwt = JWTManager(app)
 bcrypt = Bcrypt(app)
 migrate = Migrate(app, db)
