@@ -2,16 +2,20 @@
 Flask==2.3.3
 flask-cors==4.0.0
 flask-jwt-extended==4.5.3
+flask-bcrypt==1.0.1
+flask-migrate==4.0.5
+flask-sqlalchemy==3.0.5
 python-dotenv==1.0.0
 
 # HTTP requests for Gemini API
 requests==2.31.0
 
-# MongoDB dependencies (gridfs is included in pymongo)
-pymongo==4.5.0
+# Database dependencies (Python 3.13 compatible)
+sqlalchemy>=2.0.35
+# PostgreSQL (uncomment when ready): psycopg2-binary==2.9.7
 
 # Image processing and validation
-Pillow==10.0.1
+Pillow>=10.4.0
 python-magic==0.4.27
 
 # File handling and security
@@ -25,3 +29,5 @@ gunicorn==21.2.0
 # Development dependencies (optional)
 pytest==7.4.2
 pytest-flask==1.2.0
+
+psycopg2-binary

@@ -8,6 +8,8 @@
 # testing
 /coverage
 /server/.env
+/server/migrations/
+chrome-extension-conversion-plan.txt
 # production
 /build
 /server/knowledge/
@@ -23,3 +25,5 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .env 
+
+/chrome-extension

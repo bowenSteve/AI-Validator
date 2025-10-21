@@ -7,15 +7,20 @@ name = "pypi"
 flask = "==2.3.3"
 flask-cors = "==4.0.0"
 flask-jwt-extended = "==4.5.3"
+flask-bcrypt = "==1.0.1"
+flask-migrate = "==4.0.5"
+flask-sqlalchemy = "==3.0.5"
 python-dotenv = "==1.0.0"
 requests = "==2.31.0"
-pymongo = "==4.5.0"
+# psycopg2-binary = "==2.9.7"  # Commented out due to installation issues
+sqlalchemy = "==2.0.23"
 pillow = "==10.0.1"
 python-magic = "==0.4.27"
 werkzeug = "==2.3.7"
 gunicorn = "==21.2.0"
 pytest = "==7.4.2"
 pytest-flask = "==1.2.0"
+psycopg2-binary = "*"
 
 [dev-packages]
 

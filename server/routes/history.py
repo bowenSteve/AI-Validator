@@ -1,16 +1,14 @@
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
-import pymongo
-from bson import ObjectId
 import os
 import logging
+from sqlalchemy import func, and_, or_
+
+# Import SQLAlchemy models
+from models import db, Upload, Comparison
 
 history_bp = Blueprint('History', __name__)
 logger = logging.getLogger(__name__)
-
-def get_db():
-    client = pymongo.MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
-    return client[os.getenv('MONGODB_DB_NAME', 'middesk')]
 
 @history_bp.route('/', methods=['GET'])
 def history_index():
@@ -35,44 +33,38 @@ def debug_database():
     Debug endpoint to check what's actually in the database
     """
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        comparisons_collection = db.comparisons
-        
         # Count documents
-        total_uploads = uploads_collection.count_documents({})
-        total_comparisons = comparisons_collection.count_documents({})
-        
+        total_uploads = Upload.query.count()
+        total_comparisons = Comparison.query.count()
+
         # Get a few sample records
-        sample_uploads = list(uploads_collection.find({}).limit(3))
-        sample_comparisons = list(comparisons_collection.find({}).limit(3))
-        
-        # Convert ObjectIds to strings for JSON serialization
+        sample_uploads = Upload.query.limit(3).all()
+        sample_comparisons = Comparison.query.limit(3).all()
+
+        # Convert to dictionaries for JSON serialization
+        sample_uploads_dict = []
         for upload in sample_uploads:
-            upload['_id'] = str(upload['_id'])
-            upload['file_id'] = str(upload['file_id'])
-        
-        for comparison in sample_comparisons:
-            comparison['_id'] = str(comparison['_id'])
-            if 'main_upload_id' in comparison:
-                comparison['main_upload_id'] = str(comparison['main_upload_id'])
-            if 'secondary_upload_id' in comparison:
-                comparison['secondary_upload_id'] = str(comparison['secondary_upload_id'])
-        
+            upload_dict = upload.to_dict()
+            # Don't include file_data in debug output
+            upload_dict.pop('file_data', None)
+            sample_uploads_dict.append(upload_dict)
+
+        sample_comparisons_dict = [comp.to_dict() for comp in sample_comparisons]
+
         return jsonify({
             'success': True,
             'database_status': {
                 'total_uploads': total_uploads,
                 'total_comparisons': total_comparisons
             },
-            'sample_uploads': sample_uploads,
-            'sample_comparisons': sample_comparisons,
-            'collections_info': {
-                'uploads_indexes': uploads_collection.index_information(),
-                'comparisons_indexes': comparisons_collection.index_information()
+            'sample_uploads': sample_uploads_dict,
+            'sample_comparisons': sample_comparisons_dict,
+            'database_info': {
+                'upload_table': 'uploads',
+                'comparison_table': 'comparisons'
             }
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Debug database error: {str(e)}")
         return jsonify({'error': 'Debug failed', 'details': str(e)}), 500
@@ -98,72 +90,63 @@ def get_upload_history():
         limit = min(int(request.args.get('limit', 20)), 100)  # Cap at 100
         sort_order = request.args.get('sort', 'newest')
         
-        # Build MongoDB query
-        query = {}
-        
+        # Build SQLAlchemy query
+        query = Upload.query
+
         # Date range filter
         if start_date or end_date:
-            date_filter = {}
             if start_date:
                 try:
                     start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    date_filter['$gte'] = start
+                    query = query.filter(Upload.upload_date >= start)
                 except ValueError:
                     return jsonify({'error': 'Invalid start_date format. Use ISO format (YYYY-MM-DD)'}), 400
-                    
+
             if end_date:
                 try:
                     end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
                     # Include the entire end day
                     end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    date_filter['$lte'] = end
+                    query = query.filter(Upload.upload_date <= end)
                 except ValueError:
                     return jsonify({'error': 'Invalid end_date format. Use ISO format (YYYY-MM-DD)'}), 400
-                    
-            query['upload_date'] = date_filter
-        
+
         # Image type filter
         if image_type and image_type != 'all':
             if image_type not in ['main', 'secondary']:
                 return jsonify({'error': 'Invalid image_type. Must be "main", "secondary", or "all"'}), 400
-            query['image_type'] = image_type
-        
-        db = get_db()
-        uploads_collection = db.uploads
-        
+            query = query.filter(Upload.image_type == image_type)
+
         # Get total count for pagination
-        total = uploads_collection.count_documents(query)
-        
+        total = query.count()
+
         # Set sort order
-        sort_direction = -1 if sort_order == 'newest' else 1
-        
+        if sort_order == 'newest':
+            query = query.order_by(Upload.upload_date.desc())
+        else:
+            query = query.order_by(Upload.upload_date.asc())
+
         # Get paginated results
-        uploads = uploads_collection.find(query).sort('upload_date', sort_direction).skip((page - 1) * limit).limit(limit)
+        uploads = query.offset((page - 1) * limit).limit(limit).all()
         
         upload_list = []
         for upload in uploads:
-            gemini_data = upload.get('gemini_processing', {})
-            
-            # Handle both old and new upload formats
-            has_gemini_processing = 'gemini_processing' in upload
-            
             upload_data = {
-                'upload_id': str(upload['_id']),
-                'file_id': str(upload['file_id']),
-                'filename': upload.get('filename', upload.get('original_filename', 'unknown')),
-                'original_filename': upload.get('original_filename', ''),
-                'image_type': upload['image_type'],
-                'content_type': upload.get('content_type', ''),
-                'file_size': upload['file_size'],
-                'original_size': upload.get('original_size', upload['file_size']),
-                'upload_date': upload['upload_date'].isoformat(),
-                'status': upload['status'],
-                'has_text_extraction': has_gemini_processing,
-                'extracted_text': gemini_data.get('extracted_text', '') if has_gemini_processing else '',
-                'text_extraction_success': gemini_data.get('processed', False) if has_gemini_processing else None,
-                'text_extraction_error': gemini_data.get('error', None) if has_gemini_processing else None,
-                'processed_at': gemini_data.get('processed_at').isoformat() if gemini_data.get('processed_at') else None,
-                'gemini_result': gemini_data.get('result', {}) if has_gemini_processing else {}
+                'upload_id': str(upload.id),
+                'filename': upload.filename,
+                'original_filename': upload.original_filename,
+                'image_type': upload.image_type,
+                'content_type': upload.content_type,
+                'file_size': upload.file_size,
+                'original_size': upload.original_size,
+                'upload_date': upload.upload_date.isoformat(),
+                'status': upload.status,
+                'has_text_extraction': upload.gemini_processed,
+                'extracted_text': upload.gemini_extracted_text or '',
+                'text_extraction_success': upload.gemini_processed,
+                'text_extraction_error': upload.gemini_error,
+                'processed_at': upload.gemini_processed_at.isoformat() if upload.gemini_processed_at else None,
+                'gemini_result': upload.gemini_result or {}
             }
             upload_list.append(upload_data)
         
@@ -220,74 +203,35 @@ def get_upload_stats():
                 except ValueError:
                     return jsonify({'error': 'Invalid end_date format'}), 400
         
-        db = get_db()
-        uploads_collection = db.uploads
-        
         # Base query with date filter
-        base_query = {'upload_date': date_filter} if date_filter else {}
-        
+        base_query = Upload.query
+        if date_filter:
+            if '$gte' in date_filter:
+                base_query = base_query.filter(Upload.upload_date >= date_filter['$gte'])
+            if '$lte' in date_filter:
+                base_query = base_query.filter(Upload.upload_date <= date_filter['$lte'])
+
         # Get statistics
-        total_uploads = uploads_collection.count_documents(base_query)
-        
-        main_uploads = uploads_collection.count_documents({**base_query, 'image_type': 'main'})
-        secondary_uploads = uploads_collection.count_documents({**base_query, 'image_type': 'secondary'})
-        
+        total_uploads = base_query.count()
+
+        main_uploads = base_query.filter(Upload.image_type == 'main').count()
+        secondary_uploads = base_query.filter(Upload.image_type == 'secondary').count()
+
         # Text extraction stats
-        successful_extractions = uploads_collection.count_documents({
-            **base_query, 
-            'gemini_processing.processed': True
-        })
-        failed_extractions = uploads_collection.count_documents({
-            **base_query, 
-            'gemini_processing.processed': False
-        })
-        # Count records where gemini_processing doesn't exist or processed field is missing
-        pending_extractions = uploads_collection.count_documents({
-            **base_query,
-            '$or': [
-                {'gemini_processing': {'$exists': False}},
-                {'gemini_processing.processed': {'$exists': False}}
-            ]
-        })
-        
+        successful_extractions = base_query.filter(Upload.gemini_processed == True).count()
+        failed_extractions = base_query.filter(Upload.gemini_processed == False).count()
+        pending_extractions = base_query.filter(Upload.gemini_processed == None).count()
+
         # Calculate total file size
-        pipeline = [
-            {'$match': base_query},
-            {'$group': {'_id': None, 'total_size': {'$sum': '$file_size'}}}
-        ]
-        size_result = list(uploads_collection.aggregate(pipeline))
-        total_file_size = size_result[0]['total_size'] if size_result else 0
+        total_file_size = db.session.query(func.sum(Upload.file_size)).filter(
+            Upload.id.in_([u.id for u in base_query.all()])
+        ).scalar() or 0
         
-        # Get uploads by date (last 30 days or within date range)
-        if not date_filter:
-            # Default to last 30 days if no date filter
-            thirty_days_ago = datetime.utcnow() - timedelta(days=30)
-            date_filter = {'$gte': thirty_days_ago}
-        
-        daily_pipeline = [
-            {'$match': {**base_query, 'upload_date': date_filter}},
-            {'$group': {
-                '_id': {
-                    'year': {'$year': '$upload_date'},
-                    'month': {'$month': '$upload_date'},
-                    'day': {'$dayOfMonth': '$upload_date'}
-                },
-                'count': {'$sum': 1},
-                'main_count': {'$sum': {'$cond': [{'$eq': ['$image_type', 'main']}, 1, 0]}},
-                'secondary_count': {'$sum': {'$cond': [{'$eq': ['$image_type', 'secondary']}, 1, 0]}}
-            }},
-            {'$sort': {'_id.year': 1, '_id.month': 1, '_id.day': 1}}
-        ]
-        
+        # Get daily stats (simplified for now - could be enhanced with proper SQL aggregation)
         daily_stats = []
-        for day in uploads_collection.aggregate(daily_pipeline):
-            date_str = f"{day['_id']['year']}-{day['_id']['month']:02d}-{day['_id']['day']:02d}"
-            daily_stats.append({
-                'date': date_str,
-                'total': day['count'],
-                'main': day['main_count'],
-                'secondary': day['secondary_count']
-            })
+
+        # For now, just return empty daily stats (this would need proper SQL aggregation for production)
+        # TODO: Implement proper daily statistics aggregation using SQL
         
         return jsonify({
             'success': True,
@@ -319,30 +263,26 @@ def get_upload_detail(upload_id):
     Get detailed information for a specific upload
     """
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
-        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        upload = Upload.query.filter_by(id=upload_id).first()
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
-        
+
         upload_detail = {
-            'upload_id': str(upload['_id']),
-            'file_id': str(upload['file_id']),
-            'filename': upload['filename'],
-            'original_filename': upload['original_filename'],
-            'image_type': upload['image_type'],
-            'content_type': upload['content_type'],
-            'file_size': upload['file_size'],
-            'original_size': upload.get('original_size', upload['file_size']),
-            'upload_date': upload['upload_date'].isoformat(),
-            'status': upload['status'],
+            'upload_id': str(upload.id),
+            'filename': upload.filename,
+            'original_filename': upload.original_filename,
+            'image_type': upload.image_type,
+            'content_type': upload.content_type,
+            'file_size': upload.file_size,
+            'original_size': upload.original_size,
+            'upload_date': upload.upload_date.isoformat(),
+            'status': upload.status,
             'gemini_processing': {
-                'processed': upload.get('gemini_processing', {}).get('processed', False),
-                'processed_at': upload.get('gemini_processing', {}).get('processed_at').isoformat() if upload.get('gemini_processing', {}).get('processed_at') else None,
-                'extracted_text': upload.get('gemini_processing', {}).get('extracted_text', ''),
-                'error': upload.get('gemini_processing', {}).get('error'),
-                'result': upload.get('gemini_processing', {}).get('result', {})
+                'processed': upload.gemini_processed or False,
+                'processed_at': upload.gemini_processed_at.isoformat() if upload.gemini_processed_at else None,
+                'extracted_text': upload.gemini_extracted_text or '',
+                'error': upload.gemini_error,
+                'result': upload.gemini_result or {}
             }
         }
         
@@ -361,24 +301,14 @@ def delete_upload_from_history(upload_id):
     Delete an upload from history
     """
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
         # Find the upload
-        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        upload = Upload.query.filter_by(id=upload_id).first()
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
-        
-        # Delete from GridFS
-        import gridfs
-        fs = gridfs.GridFS(db)
-        try:
-            fs.delete(upload['file_id'])
-        except gridfs.NoFile:
-            pass  # File already deleted
-        
-        # Delete upload record
-        uploads_collection.delete_one({'_id': ObjectId(upload_id)})
+
+        # Delete upload record (file data is stored in the record itself)
+        db.session.delete(upload)
+        db.session.commit()
         
         return jsonify({
             'success': True,
@@ -410,57 +340,54 @@ def get_validation_history():
         limit = min(int(request.args.get('limit', 20)), 100)
         sort_order = request.args.get('sort', 'newest')
         
-        # Build MongoDB query
-        query = {}
-        
+        # Build SQLAlchemy query
+        query = Comparison.query
+
         # Date range filter
         if start_date or end_date:
-            date_filter = {}
             if start_date:
                 try:
                     start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    date_filter['$gte'] = start
+                    query = query.filter(Comparison.comparison_date >= start)
                 except ValueError:
                     return jsonify({'error': 'Invalid start_date format'}), 400
-                    
+
             if end_date:
                 try:
                     end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
                     end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
-                    date_filter['$lte'] = end
+                    query = query.filter(Comparison.comparison_date <= end)
                 except ValueError:
                     return jsonify({'error': 'Invalid end_date format'}), 400
-                    
-            query['comparison_date'] = date_filter
-        
+
         # Comparison type filter
         if comparison_type and comparison_type != 'all':
             if comparison_type not in ['simple_text', 'gemini_validation', 'simple_text_only']:
                 return jsonify({'error': 'Invalid comparison_type'}), 400
-            query['comparison_type'] = comparison_type
-        
-        db = get_db()
-        comparisons_collection = db.comparisons
-        
+            query = query.filter(Comparison.comparison_type == comparison_type)
+
         # Get total count
-        total = comparisons_collection.count_documents(query)
-        
+        total = query.count()
+
         # Set sort order
-        sort_direction = -1 if sort_order == 'newest' else 1
-        
+        if sort_order == 'newest':
+            query = query.order_by(Comparison.comparison_date.desc())
+        else:
+            query = query.order_by(Comparison.comparison_date.asc())
+
         # Get paginated results
-        comparisons = comparisons_collection.find(query).sort('comparison_date', sort_direction).skip((page - 1) * limit).limit(limit)
+        comparisons = query.offset((page - 1) * limit).limit(limit).all()
         
         comparison_list = []
         for comp in comparisons:
-            validation_result = comp.get('validation_result', {})
-            
+            validation_result = comp.validation_result or {}
+
             comparison_data = {
-                'comparison_id': str(comp['_id']),
-                'main_upload_id': str(comp['main_upload_id']) if 'main_upload_id' in comp else None,
-                'secondary_upload_id': str(comp['secondary_upload_id']) if 'secondary_upload_id' in comp else None,
-                'comparison_date': comp['comparison_date'].isoformat(),
-                'comparison_type': comp.get('comparison_type', 'simple_text'),
+                'comparison_id': str(comp.id),
+                'main_upload_id': str(comp.main_upload_id) if comp.main_upload_id else None,
+                'secondary_upload_id': str(comp.secondary_upload_id) if comp.secondary_upload_id else None,
+                'comparison_date': comp.comparison_date.isoformat(),
+                'comparison_type': comp.comparison_type,
                 'validation_result': validation_result,
                 # Summary fields for easy access
                 'accuracy_score': validation_result.get('accuracy_score', validation_result.get('overall_similarity', 0)),

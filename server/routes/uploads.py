@@ -1,31 +1,22 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, Response
 from datetime import datetime, timedelta
-import pymongo
-from bson import ObjectId
 import uuid
 import os
 import base64
-import gridfs
 from werkzeug.utils import secure_filename
 import magic
 from PIL import Image
 import io
 import logging
 
+# Import SQLAlchemy models
+from models import db, Upload
+
 # Import Gemini service
 from services.gemini import gemini_service
 
 uploads_bp = Blueprint('Uploads', __name__, url_prefix='/api/uploads')
 logger = logging.getLogger(__name__)
-
-def get_db():
-    client = pymongo.MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
-    return client[os.getenv('MONGODB_DB_NAME', 'middesk')]
-
-def get_gridfs():
-    """Get GridFS instance for storing large files"""
-    db = get_db()
-    return gridfs.GridFS(db)
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
@@ -67,73 +58,54 @@ def handle_image_upload(file_data, filename, content_type, image_type):
     # Validate file size (10MB limit)
     if len(file_data) > 10 * 1024 * 1024:
         raise ValueError('File size exceeds 10MB limit')
-    
+
     # Validate if it's actually an image
     if not validate_image(file_data):
         raise ValueError('Invalid image file')
-    
+
     # Optimize image
     optimized_data = optimize_image(file_data)
-    
+
     # Generate unique filename
     secure_name = secure_filename(filename)
     unique_filename = f"{uuid.uuid4()}_{secure_name}"
-    
-    # Store in GridFS
-    fs = get_gridfs()
-    file_id = fs.put(
-        optimized_data,
-        filename=unique_filename,
-        content_type=content_type,
-        upload_date=datetime.utcnow(),
-        metadata={
-            'original_filename': filename,
-            'image_type': image_type,
-            'file_size': len(optimized_data),
-            'original_size': len(file_data)
-        }
-    )
-    
+
     # Process with Gemini API
     logger.info(f"Triggering Gemini API call for {image_type} image processing")
     gemini_success, gemini_result = gemini_service.extract_text_from_image(optimized_data, image_type)
-    
-    # Store metadata in uploads collection
-    db = get_db()
-    uploads_collection = db.uploads
-    
-    upload_record = {
-        'file_id': file_id,
-        'filename': unique_filename,
-        'original_filename': filename,
-        'image_type': image_type,
-        'content_type': content_type,
-        'file_size': len(optimized_data),
-        'original_size': len(file_data),
-        'upload_date': datetime.utcnow(),
-        'status': 'uploaded',
-        'gemini_processing': {
-            'processed': gemini_success,
-            'processed_at': datetime.utcnow() if gemini_success else None,
-            'result': gemini_result,
-            'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
-            'confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
-            'has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
-            'validation': gemini_result.get('validation', {}) if gemini_success else {},
-            'error': gemini_result.get('error') if not gemini_success else None
-        }
-    }
-    
-    result = uploads_collection.insert_one(upload_record)
-    
+
+    # Create new upload record
+    upload = Upload(
+        filename=unique_filename,
+        original_filename=filename,
+        image_type=image_type,
+        content_type=content_type,
+        file_size=len(optimized_data),
+        original_size=len(file_data),
+        file_data=optimized_data,
+        upload_date=datetime.utcnow(),
+        status='uploaded',
+        gemini_processed=gemini_success,
+        gemini_processed_at=datetime.utcnow() if gemini_success else None,
+        gemini_extracted_text=gemini_result.get('extracted_text', '') if gemini_success else None,
+        gemini_confidence_score=gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
+        gemini_has_uncertainties=gemini_result.get('has_uncertainties', False) if gemini_success else False,
+        gemini_validation=gemini_result.get('validation', {}) if gemini_success else {},
+        gemini_result=gemini_result,
+        gemini_error=gemini_result.get('error') if not gemini_success else None
+    )
+
+    # Save to database
+    db.session.add(upload)
+    db.session.commit()
+
     # Prepare response
     response_data = {
-        'upload_id': str(result.inserted_id),
-        'file_id': str(file_id),
+        'upload_id': str(upload.id),
         'filename': unique_filename,
         'image_type': image_type,
         'file_size': len(optimized_data),
-        'upload_date': upload_record['upload_date'].isoformat(),
+        'upload_date': upload.upload_date.isoformat(),
         'gemini_processing': {
             'success': gemini_success,
             'extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
@@ -144,13 +116,13 @@ def handle_image_upload(file_data, filename, content_type, image_type):
             'processing_time': gemini_result.get('attempt', 1) if gemini_success else None
         }
     }
-    
+
     # Log the result
     if gemini_success:
         logger.info(f"Successfully processed {image_type} image with Gemini. Text length: {len(gemini_result.get('extracted_text', ''))}")
     else:
         logger.error(f"Failed to process {image_type} image with Gemini: {gemini_result.get('error', 'Unknown error')}")
-    
+
     return response_data
 
 # ============= MAIN IMAGE ROUTES =============
@@ -242,30 +214,27 @@ def get_main_images():
     try:
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
-        
-        db = get_db()
-        uploads_collection = db.uploads
-        
+
         # Query only main images
-        query = {'image_type': 'main'}
-        
-        # Get total count
-        total = uploads_collection.count_documents(query)
-        
+        total = Upload.query.filter_by(image_type='main').count()
+
         # Get paginated results
-        uploads = uploads_collection.find(query).sort('upload_date', -1).skip((page - 1) * limit).limit(limit)
-        
+        uploads = Upload.query.filter_by(image_type='main')\
+            .order_by(Upload.upload_date.desc())\
+            .offset((page - 1) * limit)\
+            .limit(limit)\
+            .all()
+
         upload_list = []
         for upload in uploads:
             upload_list.append({
-                'upload_id': str(upload['_id']),
-                'file_id': str(upload['file_id']),
-                'filename': upload['original_filename'],
-                'file_size': upload['file_size'],
-                'upload_date': upload['upload_date'].isoformat(),
-                'status': upload['status']
+                'upload_id': str(upload.id),
+                'filename': upload.original_filename,
+                'file_size': upload.file_size,
+                'upload_date': upload.upload_date.isoformat(),
+                'status': upload.status
             })
-        
+
         return jsonify({
             'success': True,
             'images': upload_list,
@@ -276,7 +245,7 @@ def get_main_images():
                 'pages': (total + limit - 1) // limit
             }
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Get main images error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve main images'}), 500
@@ -285,35 +254,24 @@ def get_main_images():
 def delete_main_image(upload_id):
     """Delete a main image and its associated file"""
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
         # Find the upload record (ensure it's a main image)
-        upload = uploads_collection.find_one({
-            '_id': ObjectId(upload_id),
-            'image_type': 'main'
-        })
-        
+        upload = Upload.query.filter_by(id=upload_id, image_type='main').first()
+
         if not upload:
             return jsonify({'error': 'Main image not found'}), 404
-        
-        # Delete from GridFS
-        fs = get_gridfs()
-        try:
-            fs.delete(upload['file_id'])
-        except gridfs.NoFile:
-            pass  # File already deleted
-        
-        # Delete upload record
-        uploads_collection.delete_one({'_id': ObjectId(upload_id)})
-        
+
+        # Delete upload record (file data is stored in the record itself)
+        db.session.delete(upload)
+        db.session.commit()
+
         return jsonify({
             'success': True,
             'message': 'Main image deleted successfully'
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Delete main image error: {str(e)}")
+        db.session.rollback()
         return jsonify({'error': 'Failed to delete main image'}), 500
 
 # ============= SECONDARY IMAGE ROUTES =============
@@ -405,30 +363,27 @@ def get_secondary_images():
     try:
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
-        
-        db = get_db()
-        uploads_collection = db.uploads
-        
+
         # Query only secondary images
-        query = {'image_type': 'secondary'}
-        
-        # Get total count
-        total = uploads_collection.count_documents(query)
-        
+        total = Upload.query.filter_by(image_type='secondary').count()
+
         # Get paginated results
-        uploads = uploads_collection.find(query).sort('upload_date', -1).skip((page - 1) * limit).limit(limit)
-        
+        uploads = Upload.query.filter_by(image_type='secondary')\
+            .order_by(Upload.upload_date.desc())\
+            .offset((page - 1) * limit)\
+            .limit(limit)\
+            .all()
+
         upload_list = []
         for upload in uploads:
             upload_list.append({
-                'upload_id': str(upload['_id']),
-                'file_id': str(upload['file_id']),
-                'filename': upload['original_filename'],
-                'file_size': upload['file_size'],
-                'upload_date': upload['upload_date'].isoformat(),
-                'status': upload['status']
+                'upload_id': str(upload.id),
+                'filename': upload.original_filename,
+                'file_size': upload.file_size,
+                'upload_date': upload.upload_date.isoformat(),
+                'status': upload.status
             })
-        
+
         return jsonify({
             'success': True,
             'images': upload_list,
@@ -439,7 +394,7 @@ def get_secondary_images():
                 'pages': (total + limit - 1) // limit
             }
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Get secondary images error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve secondary images'}), 500
@@ -448,35 +403,24 @@ def get_secondary_images():
 def delete_secondary_image(upload_id):
     """Delete a secondary image and its associated file"""
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
         # Find the upload record (ensure it's a secondary image)
-        upload = uploads_collection.find_one({
-            '_id': ObjectId(upload_id),
-            'image_type': 'secondary'
-        })
-        
+        upload = Upload.query.filter_by(id=upload_id, image_type='secondary').first()
+
         if not upload:
             return jsonify({'error': 'Secondary image not found'}), 404
-        
-        # Delete from GridFS
-        fs = get_gridfs()
-        try:
-            fs.delete(upload['file_id'])
-        except gridfs.NoFile:
-            pass  # File already deleted
-        
-        # Delete upload record
-        uploads_collection.delete_one({'_id': ObjectId(upload_id)})
-        
+
+        # Delete upload record (file data is stored in the record itself)
+        db.session.delete(upload)
+        db.session.commit()
+
         return jsonify({
             'success': True,
             'message': 'Secondary image deleted successfully'
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Delete secondary image error: {str(e)}")
+        db.session.rollback()
         return jsonify({'error': 'Failed to delete secondary image'}), 500
 
 
@@ -489,28 +433,23 @@ def get_extracted_text(upload_id):
     Get extracted text for a specific upload
     """
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
-        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        upload = Upload.query.filter_by(id=upload_id).first()
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
-        
-        gemini_data = upload.get('gemini_processing', {})
-        
+
         return jsonify({
             'success': True,
             'upload_id': upload_id,
-            'image_type': upload['image_type'],
-            'filename': upload['original_filename'],
-            'extracted_text': gemini_data.get('extracted_text', ''),
-            'confidence_score': gemini_data.get('confidence_score', 0.0),
-            'has_uncertainties': gemini_data.get('has_uncertainties', False),
-            'processing_success': gemini_data.get('processed', False),
-            'processed_at': gemini_data.get('processed_at'),
-            'error': gemini_data.get('error')
+            'image_type': upload.image_type,
+            'filename': upload.original_filename,
+            'extracted_text': upload.gemini_extracted_text or '',
+            'confidence_score': upload.gemini_confidence_score or 0.0,
+            'has_uncertainties': upload.gemini_has_uncertainties or False,
+            'processing_success': upload.gemini_processed or False,
+            'processed_at': upload.gemini_processed_at.isoformat() if upload.gemini_processed_at else None,
+            'error': upload.gemini_error
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Get extracted text error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve extracted text'}), 500
@@ -521,45 +460,30 @@ def reprocess_with_gemini(upload_id):
     Reprocess an upload with Gemini API (useful for failed attempts)
     """
     try:
-        db = get_db()
-        uploads_collection = db.uploads
-        
-        upload = uploads_collection.find_one({'_id': ObjectId(upload_id)})
+        upload = Upload.query.filter_by(id=upload_id).first()
         if not upload:
             return jsonify({'error': 'Upload not found'}), 404
-        
-        # Get image data from GridFS
-        fs = get_gridfs()
-        try:
-            grid_out = fs.get(upload['file_id'])
-            image_data = grid_out.read()
-        except gridfs.NoFile:
-            return jsonify({'error': 'Image file not found'}), 404
-        
+
         # Reprocess with Gemini
-        logger.info(f"Triggering Gemini API call for reprocessing {upload['image_type']} image")
+        logger.info(f"Triggering Gemini API call for reprocessing {upload.image_type} image")
         gemini_success, gemini_result = gemini_service.extract_text_from_image(
-            image_data, 
-            upload['image_type']
+            upload.file_data,
+            upload.image_type
         )
-        
+
         # Update upload record
-        update_data = {
-            'gemini_processing.processed': gemini_success,
-            'gemini_processing.processed_at': datetime.utcnow() if gemini_success else None,
-            'gemini_processing.result': gemini_result,
-            'gemini_processing.extracted_text': gemini_result.get('extracted_text', '') if gemini_success else None,
-            'gemini_processing.confidence_score': gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0,
-            'gemini_processing.has_uncertainties': gemini_result.get('has_uncertainties', False) if gemini_success else False,
-            'gemini_processing.error': gemini_result.get('error') if not gemini_success else None,
-            'gemini_processing.reprocessed_at': datetime.utcnow()
-        }
-        
-        uploads_collection.update_one(
-            {'_id': ObjectId(upload_id)},
-            {'$set': update_data}
-        )
-        
+        upload.gemini_processed = gemini_success
+        upload.gemini_processed_at = datetime.utcnow() if gemini_success else None
+        upload.gemini_result = gemini_result
+        upload.gemini_extracted_text = gemini_result.get('extracted_text', '') if gemini_success else None
+        upload.gemini_confidence_score = gemini_result.get('confidence_score', 0.0) if gemini_success else 0.0
+        upload.gemini_has_uncertainties = gemini_result.get('has_uncertainties', False) if gemini_success else False
+        upload.gemini_validation = gemini_result.get('validation', {}) if gemini_success else {}
+        upload.gemini_error = gemini_result.get('error') if not gemini_success else None
+        upload.gemini_reprocessed_at = datetime.utcnow()
+
+        db.session.commit()
+
         return jsonify({
             'success': True,
             'upload_id': upload_id,
@@ -571,35 +495,33 @@ def reprocess_with_gemini(upload_id):
             'error': gemini_result.get('error') if not gemini_success else None,
             'reprocessed_at': datetime.utcnow().isoformat()
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Reprocess error: {str(e)}")
+        db.session.rollback()
         return jsonify({'error': 'Reprocessing failed', 'details': str(e)}), 500
 
-@uploads_bp.route('/image/<file_id>', methods=['GET'])
-def get_image(file_id):
+@uploads_bp.route('/image/<upload_id>', methods=['GET'])
+def get_image(upload_id):
     """
-    Retrieve an image by file_id (works for both main and secondary)
+    Retrieve an image by upload_id (works for both main and secondary)
     Returns the actual image file
     """
     try:
-        fs = get_gridfs()
-        
-        try:
-            grid_out = fs.get(ObjectId(file_id))
-        except gridfs.NoFile:
+        upload = Upload.query.filter_by(id=upload_id).first()
+        if not upload:
             return jsonify({'error': 'Image not found'}), 404
-        
-        response = current_app.response_class(
-            grid_out.read(),
-            mimetype=grid_out.content_type or 'image/jpeg'
+
+        response = Response(
+            upload.file_data,
+            mimetype=upload.content_type or 'image/jpeg'
         )
-        
+
         response.headers['Cache-Control'] = 'public, max-age=31536000'  # 1 year cache
-        response.headers['Content-Disposition'] = f'inline; filename="{grid_out.filename}"'
-        
+        response.headers['Content-Disposition'] = f'inline; filename="{upload.filename}"'
+
         return response
-        
+
     except Exception as e:
         current_app.logger.error(f"Image retrieval error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve image'}), 500
@@ -614,33 +536,32 @@ def get_all_uploads():
         page = int(request.args.get('page', 1))
         limit = int(request.args.get('limit', 20))
         image_type = request.args.get('type')  # Optional filter: 'main' or 'secondary'
-        
+
         # Build query
-        query = {}
+        query = Upload.query
         if image_type and image_type in ['main', 'secondary']:
-            query['image_type'] = image_type
-        
-        db = get_db()
-        uploads_collection = db.uploads
-        
+            query = query.filter_by(image_type=image_type)
+
         # Get total count
-        total = uploads_collection.count_documents(query)
-        
+        total = query.count()
+
         # Get paginated results
-        uploads = uploads_collection.find(query).sort('upload_date', -1).skip((page - 1) * limit).limit(limit)
-        
+        uploads = query.order_by(Upload.upload_date.desc())\
+            .offset((page - 1) * limit)\
+            .limit(limit)\
+            .all()
+
         upload_list = []
         for upload in uploads:
             upload_list.append({
-                'upload_id': str(upload['_id']),
-                'file_id': str(upload['file_id']),
-                'filename': upload['original_filename'],
-                'image_type': upload['image_type'],
-                'file_size': upload['file_size'],
-                'upload_date': upload['upload_date'].isoformat(),
-                'status': upload['status']
+                'upload_id': str(upload.id),
+                'filename': upload.original_filename,
+                'image_type': upload.image_type,
+                'file_size': upload.file_size,
+                'upload_date': upload.upload_date.isoformat(),
+                'status': upload.status
             })
-        
+
         return jsonify({
             'success': True,
             'uploads': upload_list,
@@ -651,7 +572,7 @@ def get_all_uploads():
                 'pages': (total + limit - 1) // limit
             }
         }), 200
-        
+
     except Exception as e:
         current_app.logger.error(f"Get all uploads error: {str(e)}")
         return jsonify({'error': 'Failed to retrieve uploads'}), 500
